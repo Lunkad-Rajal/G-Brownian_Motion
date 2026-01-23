@@ -15,7 +15,7 @@ def get_stock_data(ticker, start_date, end_date):
         if stock_data.empty:
             return None
             
-        #Check if the columns are a "MultiIndex"
+        #Check if the columns are a MultiIndex
         if isinstance(stock_data.columns, pd.MultiIndex):
             stock_data.columns = stock_data.columns.droplevel(1)
 
