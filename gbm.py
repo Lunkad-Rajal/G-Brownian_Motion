@@ -32,20 +32,20 @@ def get_stock_data(ticker, start_date, end_date):
         return None
 
 def monte_carlo_simulation(start_price, mu, sigma, days, simulations):
-    """
-    Performs Monte Carlo Simulation using Geometric Brownian Motion.
-    """
+    """Vectorized Monte Carlo Simulation using Geometric Brownian Motion."""
     dt = 1
     
-    stochastic_component = np.random.normal(0, 1, (days, simulations))
-    price_paths = np.zeros((days, simulations))
-    price_paths[0] = start_price
+    # Generate all random values at once
+    random_shocks = np.random.normal(0, 1, (days, simulations))
     
-    for t in range(1, days):
-        drift = (mu - 0.5 * sigma**2) * dt
-        diffusion = sigma * np.sqrt(dt) * stochastic_component[t]
-        price_paths[t] = price_paths[t-1] * np.exp(drift + diffusion)
-        
+    # Vectorized price path calculation
+    drift = (mu - 0.5 * sigma**2) * dt
+    diffusion = sigma * np.sqrt(dt) * random_shocks
+    
+    # Cumulative product of exponential returns
+    log_returns = drift + diffusion
+    price_paths = start_price * np.exp(np.cumsum(log_returns, axis=0))
+    
     return price_paths
 
 def get_currency_symbol(ticker):
