@@ -4,7 +4,7 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
-# === NEW IMPORTS FOR ML ===
+
 from arch import arch_model
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
@@ -14,25 +14,20 @@ import warnings
 warnings.filterwarnings('ignore')
 
 def get_stock_data(ticker, start_date, end_date):
-    """
-    Fetches historical stock data from Yahoo Finance.
-    Fixed to handle yfinance updates and MultiIndex errors.
-    """
     try:
         stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
         
         if stock_data.empty:
             return None
             
-        #Check if the columns are a MultiIndex
+        #Checks if the columns are MultiIndex
         if isinstance(stock_data.columns, pd.MultiIndex):
             stock_data.columns = stock_data.columns.droplevel(1)
 
-        #Look for 'Adj Close', if missing, use 'Close'
+        #Looks for 'Adj Close'. if missing, use 'Close'
         if 'Adj Close' in stock_data.columns:
             return stock_data['Adj Close']
         elif 'Close' in stock_data.columns:
-            print("Note: 'Adj Close' was not found. Using 'Close' prices instead.")
             return stock_data['Close']
         else:
             return None
@@ -40,45 +35,35 @@ def get_stock_data(ticker, start_date, end_date):
         print(f"Error fetching data: {e}")
         return None
 
-# === NEW FUNCTION: GARCH-based Volatility Prediction ===
 def predict_volatility_garch(log_returns, forecast_days):
-    """
-    Predicts time-varying volatility using GARCH(1,1) model.
-    Returns array of predicted volatilities for each forecast day.
-    """
     try:
-        # Clean the data
-        returns_clean = log_returns.dropna() * 100  # Scale for numerical stability
+        #Cleans the data
+        returns_clean = log_returns.dropna() * 100 
         
-        # Fit GARCH(1,1) model
+        #Fits GARCH(1,1)
         model = arch_model(returns_clean, vol='Garch', p=1, q=1, rescale=False)
         model_fit = model.fit(disp='off', show_warning=False)
         
-        # Forecast volatility
+        #Forecast volatility
         forecast = model_fit.forecast(horizon=forecast_days)
         predicted_variance = forecast.variance.values[-1, :]
-        predicted_volatility = np.sqrt(predicted_variance) / 100  # Unscale
+        predicted_volatility = np.sqrt(predicted_variance) / 100
         
         return predicted_volatility
     except Exception as e:
         print(f"GARCH fitting failed: {e}. Using constant volatility.")
         return None
 
-# === NEW FUNCTION: LSTM-based Drift Prediction ===
+
 def predict_drift_lstm(prices, log_returns, forecast_days, lookback=60):
-    """
-    Predicts future drift using LSTM neural network.
-    Returns array of predicted drift values for each forecast day.
-    """
     try:
-        # Prepare data
+        #Prepare data
         returns_array = log_returns.dropna().values
         
         if len(returns_array) < lookback + 30:
-            print("Not enough data for LSTM. Using historical mean.")
+            print("Not enough data for LSTM.")
             return None
         
-        # Scale data
         scaler = MinMaxScaler(feature_range=(-1, 1))
         returns_scaled = scaler.fit_transform(returns_array.reshape(-1, 1))
         
@@ -129,10 +114,9 @@ def predict_drift_lstm(prices, log_returns, forecast_days, lookback=60):
         return predicted_returns.flatten()
     
     except Exception as e:
-        print(f"LSTM training failed: {e}. Using historical mean.")
+        print(f"LSTM training failed: {e}")
         return None
 
-# === MODIFIED FUNCTION: Enhanced Monte Carlo with Dynamic Parameters ===
 def monte_carlo_simulation(start_price, mu, sigma, days, simulations, 
                            dynamic_volatility=None, dynamic_drift=None):
     """
@@ -149,7 +133,7 @@ def monte_carlo_simulation(start_price, mu, sigma, days, simulations,
     price_paths[0] = start_price
     
     for t in range(1, days):
-        # Use dynamic parameters if available, otherwise use constants
+        # Use dynamic parameters if available. if unavailable then use standard
         current_sigma = dynamic_volatility[t-1] if dynamic_volatility is not None else sigma
         current_mu = dynamic_drift[t-1] if dynamic_drift is not None else mu
         
@@ -166,33 +150,22 @@ def get_currency_symbol(ticker):
         return '$'
 
 def run_forecast_project():
-    """
-    Main execution function with User Inputs for generic use.
-    NOW ENHANCED WITH ML-BASED PARAMETER ESTIMATION!
-    """
-    print("=" * 60)
-    print("  STOCK PRICE FORECASTING TOOL (ML-ENHANCED)")
-    print("  Features: GARCH Volatility + LSTM Drift Prediction")
-    print("=" * 60)
     
     ticker = input("\nEnter Stock Ticker (e.g., RELIANCE.NS, AAPL): ").strip().upper()
     
-    print("\n[Step 1] Define Historical Training Data Range")
     history_start = input("Enter Start Date (YYYY-MM-DD): ").strip()
     history_end = input("Enter End Date (YYYY-MM-DD): ").strip()
 
-    print("\n[Step 2] Define Forecasting Window")
     forecast_start = input("Enter Forecast Start Date (YYYY-MM-DD): ").strip()
     forecast_end = input("Enter Forecast End Date (YYYY-MM-DD): ").strip()
     
     currency = get_currency_symbol(ticker)
     num_simulations = 1000
 
-    print(f"\n--- Fetching Data for {ticker} ---")
     prices = get_stock_data(ticker, history_start, history_end)
     
     if prices is None:
-        print(f"Error: Could not fetch data. Check ticker or internet.")
+        print(f"Error: Could not fetch data")
         return
 
     log_returns = np.log(1 + prices.pct_change())
@@ -208,46 +181,24 @@ def run_forecast_project():
     num_forecast_days = len(forecast_dates)
     
     if num_forecast_days == 0:
-        print("Error: Invalid forecast date range (0 business days).")
+        print("Error: Invalid forecast date range")
         return
 
-    # === ML ENHANCEMENT: Dynamic Parameter Prediction ===
-    print(f"\n{'=' * 60}")
-    print("  TRAINING ML MODELS FOR DYNAMIC PARAMETERS")
-    print(f"{'=' * 60}")
-
-    # Predict time-varying volatility using GARCH
-    print("\n[1/2] Training GARCH model for volatility forecasting...")
+    # Predict time-varying volatility using GARCH & lstm
     predicted_volatility = predict_volatility_garch(log_returns, num_forecast_days)
 
-    # Predict drift using LSTM
-    print("[2/2] Training LSTM model for drift forecasting...")
     predicted_drift = predict_drift_lstm(prices, log_returns, num_forecast_days)
-
-    # Use ML predictions if available, otherwise fall back to historical values
-    print(f"\n{'=' * 60}")
-    print("  MODEL STATUS")
-    print(f"{'=' * 60}")
     
     if predicted_volatility is not None:
-        print(f"✓ GARCH Volatility: ACTIVE")
-        print(f"  Range: {predicted_volatility.min():.6f} - {predicted_volatility.max():.6f}")
         dynamic_vol = predicted_volatility
     else:
-        print(f"✗ GARCH Volatility: FAILED (using constant {sigma:.6f})")
         dynamic_vol = None
 
     if predicted_drift is not None:
-        print(f"✓ LSTM Drift: ACTIVE")
-        print(f"  Range: {predicted_drift.min():.6f} - {predicted_drift.max():.6f}")
         dynamic_mu = predicted_drift
     else:
-        print(f"✗ LSTM Drift: FAILED (using constant {mu:.6f})")
+        print(f"LSTM Drift: FAILED")
         dynamic_mu = None
-
-    print(f"\n{'=' * 60}")
-    print(f"  SIMULATING {num_forecast_days} TRADING DAYS")
-    print(f"{'=' * 60}")
 
     # Run simulation with dynamic parameters
     simulated_paths = monte_carlo_simulation(
@@ -258,27 +209,20 @@ def run_forecast_project():
     
     mean_price_path = np.mean(simulated_paths, axis=1)
     
-    print("\n" + "="*40)
     print(f"PREDICTED VALUES ({ticker})")
-    print("="*40)
     print(f"{'Date':<15} | {'Expected Price':<15}")
-    print("-" * 33)
     
     for i, date in enumerate(forecast_dates):
         price = mean_price_path[i]
         date_str = date.strftime('%Y-%m-%d')
         print(f"{date_str:<15} | {currency} {price:.2f}")
     
-    # Extend range by 1 day because of many timezones
+    # Extend range by 1 day. without this errors came up. needed due to possible timezone changes
     end_check_date = (pd.to_datetime(forecast_end) + timedelta(days=5)).strftime('%Y-%m-%d')
     actual_data = get_stock_data(ticker, forecast_start, end_check_date)
 
     if actual_data is not None and not actual_data.empty:
-        print("\n" + "="*40)
-        print("ACCURACY REPORT (Predicted vs Actual)")
-        print("="*40)
         print(f"{'Date':<12} | {'Predicted':<10} | {'Actual':<10} | {'Diff':<10}")
-        print("-" * 50)
 
         actual_prices = []
         predicted_prices_aligned = []
@@ -303,14 +247,13 @@ def run_forecast_project():
             rmse = np.sqrt(np.mean((preds - actuals)**2))
             mape = np.mean(np.abs((preds - actuals) / actuals)) * 100
             
-            print("-" * 50)
             print(f"Mean Absolute Error (MAE):   {currency}{mae:.2f}")
             print(f"Root Mean Sq Error (RMSE):   {currency}{rmse:.2f}")
             print(f"Mean Abs % Error (MAPE):     {mape:.2f}%")
             print(f"Directional Accuracy:        {100 - mape:.2f}% (Approx)")
-            print("="*40)
+
     else:
-        print("\nNote: Actual data for the forecast range is unavailable (likely future dates). Skipping accuracy check.")
+        print("Error")
 
     plt.figure(figsize=(10, 6))
     plt.plot(simulated_paths[:, :100], alpha=0.1, color='blue', linewidth=1)
