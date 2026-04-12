@@ -1,0 +1,120 @@
+# Monte Carlo Stock Forecasting with Hybrid Drift and GARCH Volatility
+
+## Overview
+
+This project implements a Monte Carlo simulation framework for stock price forecasting, combining:
+
+- GARCH(1,1) volatility modeling (with optional Student's t distribution for fat tails)
+- A hybrid drift model incorporating:
+  - Long-term historical mean
+  - Short-term exponentially weighted moving average (EWMA)
+  - Mean reversion dynamics
+
+The model generates probabilistic forecasts with confidence intervals and evaluates performance using standard error metrics.
+
+---
+
+## Methodology
+
+### 1. Volatility Modeling
+Volatility is estimated using a GARCH(p, q) model, capturing clustering and time-varying risk in returns.
+
+### 2. Drift Estimation
+The drift component is computed using a hybrid approach:
+
+- Long-term mean of log returns
+- Short-term EWMA trend
+- Weighted combination of both
+- Exponential reversion toward long-term mean
+
+### 3. Simulation
+Price paths are generated using Geometric Brownian Motion with time-varying drift and volatility:
+
+- 20,000 Monte Carlo simulations
+- Daily step evolution
+- Dynamic parameters at each timestep
+
+### 4. Backtesting
+Predicted prices are compared against actual market data over the forecast period.
+
+---
+
+## Backtest Results
+
+Forecast Period: 2025-01-01 to 2025-12-31  
+Asset: NVDA
+
+| Metric                  | Value   |
+|------------------------|--------|
+| Mean Absolute Error    | 15.56  |
+| Root Mean Squared Error| 20.21  |
+| Mean Absolute % Error  | 11.95% |
+| Directional Accuracy   | 53.8%  |
+
+---
+
+## Interpretation
+
+- The model achieves moderate predictive accuracy with an error range consistent with equity volatility.
+- Directional accuracy slightly above 50% indicates limited but non-random signal.
+- GARCH contributes to realistic volatility clustering, while hybrid drift stabilizes long-horizon behavior.
+
+---
+
+## Configuration
+
+Key parameters (from `CONFIG`):
+
+- Ticker: NVDA  
+- Training period: 2000–2024  
+- Forecast period: 2025  
+- Simulations: 20,000  
+- Drift method: Hybrid  
+- Long-term weight: 0.7  
+- EWMA span: 60 days  
+- GARCH distribution: Student's t  
+
+---
+
+## Output
+
+The script generates:
+
+- Monte Carlo simulation paths
+- Expected price trajectory
+- Confidence intervals (5th–95th percentile)
+- Comparison with actual prices (if available)
+
+Plots are saved to disk in the specified output directory.
+
+---
+
+## Requirements
+
+```
+numpy
+pandas
+yfinance
+matplotlib
+arch
+```
+
+---
+
+## Usage
+
+Run the script:
+
+```bash
+python forecast.py
+```
+
+---
+
+## Notes
+
+- The model assumes log-normal price dynamics.
+- Performance is sensitive to drift specification and volatility regime.
+- This is a research-oriented implementation and not intended for production trading without further validation.
+
+---
