@@ -1,277 +1,280 @@
+"""
+Monte Carlo Forecast with Hybrid Drift and GARCH Volatility
+-----------------------------------------------------------
+Saves plots to disk. Drift combines long-term mean and short-term EWMA.
+"""
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
-
+import os
+from typing import Optional
 
 from arch import arch_model
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
 import warnings
 warnings.filterwarnings('ignore')
 
-def get_stock_data(ticker, start_date, end_date):
-    try:
-        stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
-        
-        if stock_data.empty:
-            return None
-            
-        #Checks if the columns are MultiIndex
-        if isinstance(stock_data.columns, pd.MultiIndex):
-            stock_data.columns = stock_data.columns.droplevel(1)
+# ===========================
+# CONFIGURATION
+# ===========================
+CONFIG = {
+    # Stock & dates
+    'ticker': 'NVDA',
+    'train_start': '2000-01-01',
+    'train_end': '2024-12-31',
+    'forecast_start': '2025-01-01',
+    'forecast_end': '2025-12-31',
 
-        #Looks for 'Adj Close'. if missing, use 'Close'
-        if 'Adj Close' in stock_data.columns:
-            return stock_data['Adj Close']
-        elif 'Close' in stock_data.columns:
-            return stock_data['Close']
+    # Simulation
+    'num_simulations': 20000,
+
+    # Drift settings
+    'drift_method': 'hybrid',        # 'hybrid', 'ewma', 'rolling', 'constant'
+    'long_term_weight': 0.7,         # weight on long-term mean (only for hybrid)
+    'ewma_span': 60,                 # half-life in days for short-term EWMA
+    'drift_reversion_speed': 0.05,   # daily reversion to long-term mean (0 = none, 1 = instant)
+    'min_daily_drift': 0.0001,       # floor (0.01% per day) to avoid zero/negative drift
+    'max_daily_drift': 0.01,         # cap at 1% per day
+
+    # GARCH
+    'garch_p': 1,
+    'garch_q': 1,
+    'garch_dist': 't',               # 'normal' or 't' (Student's t for fat tails)
+
+    # Plotting
+    'output_dir': r'C:\A - Personal\User\Quant\RegimeStrat\output monte-carlo',
+    'plot_ci': True,
+    'ci_lower': 5,
+    'ci_upper': 95,
+}
+
+# ===========================
+# HELPER FUNCTIONS
+# ===========================
+def get_stock_data(ticker, start, end):
+    try:
+        data = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        if data.empty:
+            return None
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
+        if 'Adj Close' in data.columns:
+            prices = data['Adj Close']
+        elif 'Close' in data.columns:
+            prices = data['Close']
         else:
             return None
+        return prices.dropna()
     except Exception as e:
-        print(f"Error fetching data: {e}")
+        print(f"Data error: {e}")
         return None
 
-def predict_volatility_garch(log_returns, forecast_days):
+def compute_log_returns(prices):
+    return np.log(1 + prices.pct_change()).dropna()
+
+def predict_volatility_garch(log_returns, forecast_days, p, q, dist):
+    """GARCH(1,1) with optional Student's t distribution."""
     try:
-        #Cleans the data
-        returns_clean = log_returns.dropna() * 100 
-        
-        #Fits GARCH(1,1)
-        model = arch_model(returns_clean, vol='Garch', p=1, q=1, rescale=False)
+        returns_pct = log_returns * 100
+        model = arch_model(returns_pct, vol='Garch', p=p, q=q, dist=dist, rescale=False)
         model_fit = model.fit(disp='off', show_warning=False)
-        
-        #Forecast volatility
         forecast = model_fit.forecast(horizon=forecast_days)
-        predicted_variance = forecast.variance.values[-1, :]
-        predicted_volatility = np.sqrt(predicted_variance) / 100
-        
-        return predicted_volatility
+        var_forecast = forecast.variance.values[-1, :]
+        vol_pct = np.sqrt(var_forecast)
+        return vol_pct / 100
     except Exception as e:
-        print(f"GARCH fitting failed: {e}. Using constant volatility.")
-        return None
+        print(f"GARCH failed: {e}. Using historical std.")
+        return np.full(forecast_days, log_returns.std())
 
-
-def predict_drift_lstm(prices, log_returns, forecast_days, lookback=60):
-    try:
-        #Prepare data
-        returns_array = log_returns.dropna().values
-        
-        if len(returns_array) < lookback + 30:
-            print("Not enough data for LSTM.")
-            return None
-        
-        scaler = MinMaxScaler(feature_range=(-1, 1))
-        returns_scaled = scaler.fit_transform(returns_array.reshape(-1, 1))
-        
-        # Create sequences
-        X, y = [], []
-        for i in range(lookback, len(returns_scaled)):
-            X.append(returns_scaled[i-lookback:i, 0])
-            y.append(returns_scaled[i, 0])
-        
-        X, y = np.array(X), np.array(y)
-        X = X.reshape((X.shape[0], X.shape[1], 1))
-        
-        # Split data
-        split = int(0.8 * len(X))
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
-        
-        # Build LSTM model
-        model = Sequential([
-            LSTM(50, activation='tanh', return_sequences=True, input_shape=(lookback, 1)),
-            Dropout(0.2),
-            LSTM(50, activation='tanh'),
-            Dropout(0.2),
-            Dense(1)
-        ])
-        
-        model.compile(optimizer='adam', loss='mse')
-        
-        # Train with early stopping
-        early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-        model.fit(X_train, y_train, epochs=50, batch_size=32, 
-                  validation_data=(X_test, y_test), 
-                  callbacks=[early_stop], verbose=0)
-        
-        # Forecast
-        predicted_returns = []
-        current_sequence = returns_scaled[-lookback:]
-        
-        for _ in range(forecast_days):
-            current_sequence_reshaped = current_sequence.reshape(1, lookback, 1)
-            next_return = model.predict(current_sequence_reshaped, verbose=0)[0, 0]
-            predicted_returns.append(next_return)
-            current_sequence = np.append(current_sequence[1:], next_return)
-        
-        # Inverse transform
-        predicted_returns = scaler.inverse_transform(np.array(predicted_returns).reshape(-1, 1))
-        
-        return predicted_returns.flatten()
-    
-    except Exception as e:
-        print(f"LSTM training failed: {e}")
-        return None
-
-def monte_carlo_simulation(start_price, mu, sigma, days, simulations, 
-                           dynamic_volatility=None, dynamic_drift=None):
+def compute_hybrid_drift(log_returns, forecast_days, long_term_weight, ewma_span,
+                         reversion_speed, min_drift, max_drift):
     """
-    Performs Monte Carlo Simulation with optional time-varying parameters.
-    
-    Parameters:
-    - dynamic_volatility: Array of predicted volatilities (one per day)
-    - dynamic_drift: Array of predicted drift values (one per day)
+    Returns an array of length forecast_days with time-varying drift.
+    Drift starts at the hybrid value (weighted average of long-term mean and EWMA)
+    and reverts exponentially to the long-term mean over the forecast horizon.
     """
+    # Long-term mean (entire history)
+    long_term_mean = log_returns.mean()
+
+    # Short-term EWMA (exponential weighted mean)
+    # pandas ewm: span = half-life? Actually span ~ 2*half_life. We'll use half-life directly.
+    # For a half-life of N days, decay factor = exp(-ln(2)/N). But simpler: use span = ewma_span
+    ewma_mean = log_returns.ewm(span=ewma_span, adjust=False).mean().iloc[-1]
+
+    # Hybrid initial drift
+    initial_drift = long_term_weight * long_term_mean + (1 - long_term_weight) * ewma_mean
+    # Apply caps and floor
+    initial_drift = np.clip(initial_drift, -max_drift, max_drift)
+    if initial_drift < min_drift and long_term_mean > 0:
+        # If initial drift is too low but long-term is positive, raise it
+        initial_drift = min_drift
+
+    # Generate drift path that reverts to long-term mean
+    drift_series = np.zeros(forecast_days)
+    current = initial_drift
+    for t in range(forecast_days):
+        drift_series[t] = current
+        # Revert toward long-term mean
+        current = current + reversion_speed * (long_term_mean - current)
+        current = np.clip(current, -max_drift, max_drift)
+        if current < min_drift and long_term_mean > 0:
+            current = min_drift
+    return drift_series
+
+def compute_ewma_drift(log_returns, forecast_days, ewma_span, min_drift, max_drift):
+    """Constant drift equal to the last EWMA value (repeated)."""
+    ewma_mean = log_returns.ewm(span=ewma_span, adjust=False).mean().iloc[-1]
+    drift = np.clip(ewma_mean, -max_drift, max_drift)
+    if drift < min_drift and log_returns.mean() > 0:
+        drift = min_drift
+    return np.full(forecast_days, drift)
+
+def compute_rolling_drift(log_returns, forecast_days, window, min_drift, max_drift):
+    """Constant drift equal to rolling mean of last `window` days."""
+    if len(log_returns) < window:
+        drift_val = log_returns.mean()
+    else:
+        drift_val = log_returns.iloc[-window:].mean()
+    drift_val = np.clip(drift_val, -max_drift, max_drift)
+    if drift_val < min_drift and log_returns.mean() > 0:
+        drift_val = min_drift
+    return np.full(forecast_days, drift_val)
+
+def monte_carlo_simulation(start_price, days, simulations, dynamic_vol, dynamic_drift):
+    """Geometric Brownian motion with time-varying parameters."""
     dt = 1
-    
-    stochastic_component = np.random.normal(0, 1, (days, simulations))
-    price_paths = np.zeros((days, simulations))
-    price_paths[0] = start_price
-    
+    paths = np.zeros((days, simulations))
+    paths[0] = start_price
+    shocks = np.random.normal(0, 1, (days, simulations))
     for t in range(1, days):
-        # Use dynamic parameters if available. if unavailable then use standard
-        current_sigma = dynamic_volatility[t-1] if dynamic_volatility is not None else sigma
-        current_mu = dynamic_drift[t-1] if dynamic_drift is not None else mu
-        
-        drift = (current_mu - 0.5 * current_sigma**2) * dt
-        diffusion = current_sigma * np.sqrt(dt) * stochastic_component[t]
-        price_paths[t] = price_paths[t-1] * np.exp(drift + diffusion)
-        
-    return price_paths
+        mu_t = dynamic_drift[t-1]
+        sigma_t = dynamic_vol[t-1]
+        drift = (mu_t - 0.5 * sigma_t**2) * dt
+        diffusion = sigma_t * np.sqrt(dt) * shocks[t]
+        paths[t] = paths[t-1] * np.exp(drift + diffusion)
+    return paths
 
-def get_currency_symbol(ticker):
-    if ticker.endswith('.NS') or ticker.endswith('.BO'):
-        return '₹'
-    else:
-        return '$'
+def evaluate(predicted, actual):
+    mae = np.mean(np.abs(predicted - actual))
+    rmse = np.sqrt(np.mean((predicted - actual)**2))
+    mape = np.mean(np.abs((predicted - actual) / actual)) * 100
+    pred_changes = np.sign(np.diff(predicted, prepend=predicted[0]))
+    actual_changes = np.sign(np.diff(actual, prepend=actual[0]))
+    dir_acc = np.mean(pred_changes == actual_changes) * 100
+    return {'MAE': mae, 'RMSE': rmse, 'MAPE': mape, 'DirAcc': dir_acc}
 
-def run_forecast_project():
-    
-    ticker = input("\nEnter Stock Ticker (e.g., RELIANCE.NS, AAPL): ").strip().upper()
-    
-    history_start = input("Enter Start Date (YYYY-MM-DD): ").strip()
-    history_end = input("Enter End Date (YYYY-MM-DD): ").strip()
+# ===========================
+# MAIN PIPELINE
+# ===========================
+def run_forecast():
+    cfg = CONFIG
+    os.makedirs(cfg['output_dir'], exist_ok=True)
 
-    forecast_start = input("Enter Forecast Start Date (YYYY-MM-DD): ").strip()
-    forecast_end = input("Enter Forecast End Date (YYYY-MM-DD): ").strip()
-    
-    currency = get_currency_symbol(ticker)
-    num_simulations = 1000
-
-    prices = get_stock_data(ticker, history_start, history_end)
-    
-    if prices is None:
-        print(f"Error: Could not fetch data")
+    print(f"Loading {cfg['ticker']} from {cfg['train_start']} to {cfg['train_end']}...")
+    prices_train = get_stock_data(cfg['ticker'], cfg['train_start'], cfg['train_end'])
+    if prices_train is None or len(prices_train) < 100:
+        print("Insufficient data.")
         return
 
-    log_returns = np.log(1 + prices.pct_change())
-    mu = log_returns.mean()
-    sigma = log_returns.std()
-    
-    last_actual_price = float(prices.iloc[-1])
-    print(f"Last Training Price: {currency}{last_actual_price:.2f}")
-    print(f"Historical Daily Volatility: {sigma:.6f}")
-    print(f"Historical Daily Drift: {mu:.6f}")
+    log_returns = compute_log_returns(prices_train)
+    last_price = prices_train.iloc[-1]
 
-    forecast_dates = pd.bdate_range(start=forecast_start, end=forecast_end)
-    num_forecast_days = len(forecast_dates)
-    
-    if num_forecast_days == 0:
-        print("Error: Invalid forecast date range")
+    forecast_dates = pd.bdate_range(start=cfg['forecast_start'], end=cfg['forecast_end'])
+    forecast_days = len(forecast_dates)
+    if forecast_days == 0:
+        print("No forecast days.")
         return
 
-    # Predict time-varying volatility using GARCH & lstm
-    predicted_volatility = predict_volatility_garch(log_returns, num_forecast_days)
-
-    predicted_drift = predict_drift_lstm(prices, log_returns, num_forecast_days)
-    
-    if predicted_volatility is not None:
-        dynamic_vol = predicted_volatility
-    else:
-        dynamic_vol = None
-
-    if predicted_drift is not None:
-        dynamic_mu = predicted_drift
-    else:
-        print(f"LSTM Drift: FAILED")
-        dynamic_mu = None
-
-    # Run simulation with dynamic parameters
-    simulated_paths = monte_carlo_simulation(
-        last_actual_price, mu, sigma, num_forecast_days, num_simulations,
-        dynamic_volatility=dynamic_vol,
-        dynamic_drift=dynamic_mu
+    # 1. Volatility forecast (GARCH)
+    print("Running GARCH volatility forecast...")
+    vol_forecast = predict_volatility_garch(
+        log_returns, forecast_days,
+        cfg['garch_p'], cfg['garch_q'], cfg['garch_dist']
     )
-    
-    mean_price_path = np.mean(simulated_paths, axis=1)
-    
-    print(f"PREDICTED VALUES ({ticker})")
-    print(f"{'Date':<15} | {'Expected Price':<15}")
-    
-    for i, date in enumerate(forecast_dates):
-        price = mean_price_path[i]
-        date_str = date.strftime('%Y-%m-%d')
-        print(f"{date_str:<15} | {currency} {price:.2f}")
-    
-    # Extend range by 1 day. without this errors came up. needed due to possible timezone changes
-    end_check_date = (pd.to_datetime(forecast_end) + timedelta(days=5)).strftime('%Y-%m-%d')
-    actual_data = get_stock_data(ticker, forecast_start, end_check_date)
 
-    if actual_data is not None and not actual_data.empty:
-        print(f"{'Date':<12} | {'Predicted':<10} | {'Actual':<10} | {'Diff':<10}")
+    # 2. Drift forecast (hybrid, EWMA, or rolling)
+    print(f"Drift method: {cfg['drift_method']}")
+    if cfg['drift_method'] == 'hybrid':
+        drift_forecast = compute_hybrid_drift(
+            log_returns, forecast_days,
+            cfg['long_term_weight'], cfg['ewma_span'],
+            cfg['drift_reversion_speed'],
+            cfg['min_daily_drift'], cfg['max_daily_drift']
+        )
+    elif cfg['drift_method'] == 'ewma':
+        drift_forecast = compute_ewma_drift(
+            log_returns, forecast_days, cfg['ewma_span'],
+            cfg['min_daily_drift'], cfg['max_daily_drift']
+        )
+    elif cfg['drift_method'] == 'rolling':
+        drift_forecast = compute_rolling_drift(
+            log_returns, forecast_days, cfg['ewma_span'],
+            cfg['min_daily_drift'], cfg['max_daily_drift']
+        )
+    else:  # constant = historical mean
+        drift_val = np.clip(log_returns.mean(), -cfg['max_daily_drift'], cfg['max_daily_drift'])
+        drift_forecast = np.full(forecast_days, drift_val)
 
-        actual_prices = []
-        predicted_prices_aligned = []
+    print(f"Initial drift: {drift_forecast[0]:.6f} (daily)")
+    print(f"Long-term historical drift: {log_returns.mean():.6f}")
 
-        for i, date in enumerate(forecast_dates):
-            if date in actual_data.index:
-                actual_val = float(actual_data.loc[date])
-                pred_val = mean_price_path[i]
+    # 3. Monte Carlo simulation
+    print(f"Running {cfg['num_simulations']} simulations...")
+    paths = monte_carlo_simulation(
+        last_price, forecast_days, cfg['num_simulations'],
+        vol_forecast, drift_forecast
+    )
+    expected = np.mean(paths, axis=1)
+    lower = np.percentile(paths, cfg['ci_lower'], axis=1)
+    upper = np.percentile(paths, cfg['ci_upper'], axis=1)
 
-                actual_prices.append(actual_val)
-                predicted_prices_aligned.append(pred_val)
-                
-                diff = pred_val - actual_val
-                date_str = date.strftime('%Y-%m-%d')
-                print(f"{date_str:<12} | {pred_val:.2f}      | {actual_val:.2f}      | {diff:+.2f}")
-
-        if len(actual_prices) > 0:
-            actuals = np.array(actual_prices)
-            preds = np.array(predicted_prices_aligned)
-            
-            mae = np.mean(np.abs(preds - actuals))
-            rmse = np.sqrt(np.mean((preds - actuals)**2))
-            mape = np.mean(np.abs((preds - actuals) / actuals)) * 100
-            
-            print(f"Mean Absolute Error (MAE):   {currency}{mae:.2f}")
-            print(f"Root Mean Sq Error (RMSE):   {currency}{rmse:.2f}")
-            print(f"Mean Abs % Error (MAPE):     {mape:.2f}%")
-            print(f"Directional Accuracy:        {100 - mape:.2f}% (Approx)")
-
+    # 4. Backtest with actual data
+    actual_prices = get_stock_data(cfg['ticker'], cfg['forecast_start'], cfg['forecast_end'])
+    if actual_prices is not None and not actual_prices.empty:
+        common = forecast_dates.intersection(actual_prices.index)
+        if len(common) > 0:
+            actual_vals = actual_prices.loc[common].values
+            pred_vals = expected[forecast_dates.get_indexer(common)]
+            metrics = evaluate(pred_vals, actual_vals)
+            print("\n=== BACKTEST RESULTS ===")
+            print(f"MAE:  {metrics['MAE']:.2f}")
+            print(f"RMSE: {metrics['RMSE']:.2f}")
+            print(f"MAPE: {metrics['MAPE']:.2f}%")
+            print(f"Directional Accuracy: {metrics['DirAcc']:.1f}%")
+        else:
+            actual_prices = None
     else:
-        print("Error")
+        print("No actual data for backtest.")
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(simulated_paths[:, :100], alpha=0.1, color='blue', linewidth=1)
-    plt.plot(mean_price_path, color='red', linewidth=3, label='Expected Price (ML-Enhanced)')
-    
-    if actual_data is not None and not actual_data.empty:
-         # Filter actual data to only show the relevant part on the graph
-         relevant_actuals = actual_data[actual_data.index.isin(forecast_dates)]
-         if not relevant_actuals.empty:
-            plt.plot(relevant_actuals.index, relevant_actuals.values, color='green', linewidth=3, label='ACTUAL Price')
+    # 5. Plot and save
+    plt.figure(figsize=(12, 6))
+    # Show a subset of simulated paths
+    plt.plot(paths[:, :min(100, cfg['num_simulations'])], color='blue', alpha=0.05, linewidth=0.8)
+    plt.plot(expected, color='red', linewidth=2, label='Expected Price (Hybrid Drift + GARCH)')
+    if cfg['plot_ci']:
+        plt.fill_between(range(forecast_days), lower, upper, color='red', alpha=0.2,
+                         label=f'{cfg["ci_lower"]}–{cfg["ci_upper"]} percentile')
+    if actual_prices is not None:
+        idx = [forecast_dates.get_loc(d) for d in common]
+        plt.plot(idx, actual_vals, color='green', linewidth=2, label='Actual Price')
 
-    plt.title(f"ML-Enhanced Forecast: {ticker} ({forecast_start} to {forecast_end})")
-    plt.xticks(range(len(forecast_dates)), [d.strftime('%d-%b') for d in forecast_dates], rotation=45)
-    plt.ylabel(f"Price ({currency})")
+    plt.title(f"{cfg['ticker']} Forecast ({cfg['forecast_start']} to {cfg['forecast_end']})\n"
+              f"Drift: {cfg['drift_method']} (long-term weight={cfg.get('long_term_weight',0)})")
+    plt.xlabel("Trading Day")
+    plt.ylabel("Price (₹)")
+    step = max(1, forecast_days // 10)
+    tick_pos = list(range(0, forecast_days, step))
+    plt.xticks(tick_pos, [forecast_dates[i].strftime('%b %d') for i in tick_pos], rotation=45)
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.show()
+
+    out_file = os.path.join(cfg['output_dir'],
+                            f"{cfg['ticker']}_forecast_{cfg['forecast_start']}_to_{cfg['forecast_end']}.png")
+    plt.savefig(out_file, dpi=150)
+    print(f"\nPlot saved: {out_file}")
+    plt.close()
 
 if __name__ == "__main__":
-    run_forecast_project()
+    run_forecast()
